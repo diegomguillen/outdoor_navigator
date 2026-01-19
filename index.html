@@ -1,10 +1,137 @@
-<script>
-        // --- INICIO CÓDIGO ACTUALIZADO ---
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#FFEB3B">
+    <link rel="apple-touch-icon" href="icon.png">
+    
+    <title>Seguimiento GPX</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    
+    <style>
+        /* --- ESTILOS DE ALTO CONTRASTE --- */
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; background: #000; }
         
+        #map { height: 100vh; width: 100vw; z-index: 1; }
+
+        /* Panel de Estado Superior */
+        .status-panel {
+            position: absolute;
+            top: 15px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            background-color: #FFEB3B;
+            color: #000000;
+            padding: 10px 15px;
+            border-radius: 8px;
+            border: 3px solid #000000;
+            z-index: 1000;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            display: none; 
+        }
+
+        .status-title { font-size: 0.8rem; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+        .status-value { font-size: 1.6rem; font-weight: 900; margin-top: 2px; display: block; }
+        .direction-ok { color: #006400; } 
+        .direction-wrong { color: #D50000; }
+
+        /* Contenedor de Botones Inferior */
+        .fab-container {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            display: flex;
+            flex-direction: row;
+            gap: 25px;
+            align-items: flex-end;
+        }
+
+        .btn-fab {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            border: 3px solid white;
+            background-color: #000000;
+            color: #FFFFFF;
+            font-size: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 6px 10px rgba(0,0,0,0.6);
+            transition: transform 0.1s;
+        }
+
+        .btn-fab:active { transform: scale(0.90); background-color: #333; }
+        .btn-recenter { background-color: #2196F3; display: none; }
+        .btn-layer { background-color: #4CAF50; }
+
+        #fileInput { display: none; }
+        
+        .info-strip {
+            position: absolute;
+            bottom: 5px;
+            left: 5px;
+            background: rgba(0,0,0,0.7);
+            color: #fff;
+            padding: 2px 5px;
+            font-size: 0.6rem;
+            z-index: 1000;
+            pointer-events: none;
+        }
+
+        /* Estilo para la flecha de navegación */
+        .nav-arrow-icon {
+            background: transparent;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="statusPanel" class="status-panel">
+        <span class="status-title">Sentido de Marcha</span>
+        <span id="directionIndicator" class="status-value">--</span>
+        <div id="gpsAccuracy" style="font-size: 0.75rem; margin-top:5px;">Espere GPS...</div>
+    </div>
+
+    <div id="map"></div>
+
+    <div class="fab-container">
+        <div id="btnLayer" class="btn-fab btn-layer" title="Cambiar Mapa/Satélite">
+            &#127757;
+        </div>
+        <div id="btnLoad" class="btn-fab" title="Cargar Ruta GPX">
+            &#128193;
+        </div>
+        <div id="btnRecenter" class="btn-fab btn-recenter" title="Centrar Mapa">
+            &#8982;
+        </div>
+    </div>
+    
+    <input type="file" id="fileInput" accept=".gpx">
+    <div id="wakeLockStatus" class="info-strip">Pantalla: Normal</div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <script>
+        // --- SISTEMA DE ERRORES (Anti-Pantalla Blanca) ---
+        window.onerror = function(message, source, lineno, colno, error) {
+            alert("Error JS: " + message + "\nLínea: " + lineno);
+        };
+
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('./sw.js').catch(err => console.log(err));
         }
 
+        // --- VARIABLES GLOBALES ---
         let map;
         let routeLayer, userMarker; 
         let routePoints = []; 
@@ -12,12 +139,10 @@
         let watchId = null;
         let isAutoCentering = true;
         let lastUserPosition = null;
-
-        // Variables de capas
         let osmLayer, satelliteLayer;
         let currentBaseLayer = 'osm';
 
-        // Elementos DOM
+        // --- ELEMENTOS DOM ---
         const statusPanel = document.getElementById('statusPanel');
         const dirIndicator = document.getElementById('directionIndicator');
         const gpsText = document.getElementById('gpsAccuracy');
@@ -25,7 +150,7 @@
         const btnLayer = document.getElementById('btnLayer');
         const wakeStatus = document.getElementById('wakeLockStatus');
 
-        // ICONO FLECHA SVG
+        // --- DEFINICIÓN DE FLECHA SVG ---
         const arrowIconHtml = `
             <svg viewBox="0 0 24 24" width="40" height="40" style="filter: drop-shadow(0px 0px 3px rgba(0,0,0,0.8));">
                 <path d="M12 2 L2 22 L12 18 L22 22 Z" fill="#FF0000" stroke="white" stroke-width="2"/>
@@ -35,9 +160,10 @@
             className: 'nav-arrow-icon',
             html: `<div id="userArrow" style="transform-origin: center; transition: transform 0.3s ease;">${arrowIconHtml}</div>`,
             iconSize: [40, 40],
-            iconAnchor: [20, 20] // Centro del icono
+            iconAnchor: [20, 20] 
         });
 
+        // --- INICIALIZACIÓN ---
         function initMap() {
             osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 maxZoom: 19, attribution: '© OpenStreetMap'
@@ -60,7 +186,7 @@
             loadRouteFromStorage();
         }
 
-        // --- BOTONES ---
+        // --- LISTENERS DE BOTONES ---
         btnLayer.addEventListener('click', () => {
             if (currentBaseLayer === 'osm') {
                 map.removeLayer(osmLayer);
@@ -99,24 +225,29 @@
             }
         });
 
+        // --- FUNCIONES LÓGICAS ---
         function loadRouteFromStorage() {
             const savedGPX = localStorage.getItem('saved_route_gpx');
             if (savedGPX) processGPX(savedGPX);
         }
 
         function processGPX(xmlString) {
-            const parser = new DOMParser();
-            const xmlDoc = parser.parseFromString(xmlString, "text/xml");
-            const trkpts = xmlDoc.getElementsByTagName("trkpt");
-            routePoints = [];
-            
-            for (let i = 0; i < trkpts.length; i++) {
-                routePoints.push([
-                    parseFloat(trkpts[i].getAttribute("lat")),
-                    parseFloat(trkpts[i].getAttribute("lon"))
-                ]);
+            try {
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+                const trkpts = xmlDoc.getElementsByTagName("trkpt");
+                routePoints = [];
+                
+                for (let i = 0; i < trkpts.length; i++) {
+                    routePoints.push([
+                        parseFloat(trkpts[i].getAttribute("lat")),
+                        parseFloat(trkpts[i].getAttribute("lon"))
+                    ]);
+                }
+                if (routePoints.length > 0) drawRoute();
+            } catch (e) {
+                alert("Error procesando GPX");
             }
-            if (routePoints.length > 0) drawRoute();
         }
 
         function drawRoute() {
@@ -139,7 +270,7 @@
 
             watchId = navigator.geolocation.watchPosition(
                 updateUserPosition,
-                (err) => { gpsText.innerText = "Error GPS"; },
+                (err) => { gpsText.innerText = "Error GPS: " + err.message; },
                 { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
             );
         }
@@ -148,19 +279,17 @@
             const { latitude: lat, longitude: lon, accuracy, heading } = position.coords;
             gpsText.innerText = `Precisión: ±${Math.round(accuracy)}m`;
 
-            // 1. Crear o mover marcador
+            // 1. Marcador Flecha
             if (!userMarker) {
-                // Usamos el icono de flecha
                 userMarker = L.marker([lat, lon], { icon: navigationIcon }).addTo(map);
             } else {
                 userMarker.setLatLng([lat, lon]);
             }
 
-            // 2. Rotar la flecha según el rumbo (Heading)
-            // El heading viene en grados (0 = Norte, 90 = Este, etc.)
-            // Solo es válido si nos estamos moviendo
+            // 2. Rotación de Flecha (Solo si hay heading válido)
             const arrowElement = document.getElementById('userArrow');
             if (arrowElement && heading !== null && !isNaN(heading)) {
+                // Rotamos el DIV interno
                 arrowElement.style.transform = `rotate(${heading}deg)`;
             }
 
@@ -168,6 +297,7 @@
             if (isAutoCentering) {
                 map.panTo([lat, lon]);
             }
+            
             calculateDirectionVector(lat, lon);
         }
 
@@ -176,6 +306,8 @@
             
             let minDist = Infinity;
             let idx = 0;
+            // Optimización: buscar solo en una ventana cercana si el array es muy grande
+            // pero para rutas normales (10k puntos) el loop simple aguanta bien en JS moderno.
             for (let i = 0; i < routePoints.length; i++) {
                 const d = (lat - routePoints[i][0])**2 + (lon - routePoints[i][1])**2;
                 if (d < minDist) { minDist = d; idx = i; }
@@ -233,5 +365,9 @@
             if (wakeLock !== null && document.visibilityState === 'visible') await requestWakeLock();
         });
 
+        // Arrancar
         initMap();
+
     </script>
+</body>
+</html>
