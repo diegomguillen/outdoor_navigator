@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Seguimiento GPX</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    
+    <style>
+        /* --- ESTILOS DE ALTO CONTRASTE (Día/Exterior) --- */
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; }
+        
+        #map { height: 100vh; width: 100vw; z-index: 1; }
+
+        /* Panel de Estado Superior */
+        .status-panel {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            background-color: #FFEB3B; /* Amarillo Seguridad */
+            color: #000000; /* Negro Puro */
+            padding: 15px;
+            border-radius: 8px;
+            border: 3px solid #000000;
+            z-index: 1000;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            display: none; /* Oculto hasta cargar ruta */
+        }
+
+        .status-title { font-size: 0.9rem; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+        .status-value { font-size: 1.8rem; font-weight: 900; margin-top: 5px; display: block; }
+        
+        /* Indicadores de Sentido */
+        .direction-ok { color: #006400; } /* Verde Oscuro */
+        .direction-wrong { color: #D50000; } /* Rojo Fuerte */
+
+        /* Botones Flotantes (FAB) */
+        .fab-container {
+            position: absolute;
+            bottom: 30px;
+            right: 20px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .btn-fab {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            border: 3px solid white;
+            background-color: #000000;
+            color: #FFFFFF;
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.5);
+            transition: transform 0.2s;
+        }
+
+        .btn-fab:active { transform: scale(0.95); background-color: #333; }
+        .btn-recenter { background-color: #2196F3; display: none; } /* Azul Material */
+
+        /* Inputs ocultos */
+        #fileInput { display: none; }
+        
+        /* Debug / Info menor */
+        .info-strip {
+            position: absolute;
+            bottom: 5px;
+            left: 5px;
+            background: rgba(0,0,0,0.7);
+            color: #fff;
+            padding: 2px 5px;
+            font-size: 0.7rem;
+            z-index: 1000;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="statusPanel" class="status-panel">
+        <span class="status-title">Sentido de Marcha</span>
+        <span id="directionIndicator" class="status-value">--</span>
+        <div id="gpsAccuracy" style="font-size: 0.8rem; margin-top:5px;">Espere GPS...</div>
+    </div>
+
+    <div id="map"></div>
+
+    <div class="fab-container">
+        <div id="btnRecenter" class="btn-fab btn-recenter" title="Centrar en mi posición">
+            &#8982; </div>
+        <div id="btnLoad" class="btn-fab" title="Cargar Ruta GPX">
+            &#128193; </div>
+    </div>
+    
+    <input type="file" id="fileInput" accept=".gpx">
+    <div id="wakeLockStatus" class="info-strip">Pantalla: Normal</div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <script>
+        /**
+         * CONFIGURACIÓN GLOBAL
+         */
+        let map;
+        let routeLayer; // Capa de la polilínea
+        let userMarker; // Marcador del usuario
+        let routePoints = []; // Array de [lat, lon]
+        let wakeLock = null;
+        let watchId = null;
+
+        // Estado del sistema
+        let isAutoCentering = true;
+        let lastUserPosition = null; // {lat, lon, timestamp}
+        
+        // Elementos DOM
+        const statusPanel = document.getElementById('statusPanel');
+        const dirIndicator = document.getElementById('directionIndicator');
+        const gpsText = document.getElementById('gpsAccuracy');
+        const btnRecenter = document.getElementById('btnRecenter');
+        const wakeStatus = document.getElementById('wakeLockStatus');
+
+        /**
+         * 1. INICIALIZACIÓN DEL MAPA Y CAPAS
+         */
+        function initMap() {
+            // Capa OSM (Estándar)
+            const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '© OpenStreetMap'
+            });
+
+            // Capa Satélite (Esri World Imagery - No requiere API Key)
+            const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                attribution: 'Tiles © Esri'
+            });
+
+            map = L.map('map', {
+                center: [37.9838, -1.1280], // Centro por defecto (Murcia aprox)
+                zoom: 13,
+                layers: [osmLayer], // Capa por defecto
+                zoomControl: false // Desactivamos zoom default para ganar espacio
+            });
+
+            // Control de Capas
+            const baseMaps = {
+                "Mapa Estándar": osmLayer,
+                "Satélite": satelliteLayer
+            };
+            L.control.layers(baseMaps).addTo(map);
+
+            // Eventos para detectar interacción manual y desactivar auto-centrado
+            map.on('dragstart', () => disableAutoCenter());
+            map.on('zoomstart', () => disableAutoCenter());
+
+            // Recuperar ruta si existe
+            loadRouteFromStorage();
+        }
+
+        /**
+         * 2. GESTIÓN DE ARCHIVOS GPX
+         */
+        document.getElementById('btnLoad').addEventListener('click', () => {
+            document.getElementById('fileInput').click();
+        });
+
+        document.getElementById('fileInput').addEventListener('change', handleFileSelect, false);
+
+        function handleFileSelect(evt) {
+            const file = evt.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const gpxContent = e.target.result;
+                processGPX(gpxContent);
+                // Persistencia
+                localStorage.setItem('saved_route_gpx', gpxContent);
+            };
+            reader.readAsText(file);
+        }
+
+        function loadRouteFromStorage() {
+            const savedGPX = localStorage.getItem('saved_route_gpx');
+            if (savedGPX) {
+                processGPX(savedGPX);
+            }
+        }
+
+        function processGPX(xmlString) {
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+            const trkpts = xmlDoc.getElementsByTagName("trkpt");
+            
+            routePoints = []; // Reiniciar
+            
+            for (let i = 0; i < trkpts.length; i++) {
+                const lat = parseFloat(trkpts[i].getAttribute("lat"));
+                const lon = parseFloat(trkpts[i].getAttribute("lon"));
+                routePoints.push([lat, lon]);
+            }
+
+            if (routePoints.length === 0) {
+                alert("No se encontraron puntos válidos en el GPX.");
+                return;
+            }
+
+            drawRoute();
+        }
+
+        function drawRoute() {
+            // Limpiar capa anterior
+            if (routeLayer) map.removeLayer(routeLayer);
+
+            // Dibujar línea de alto contraste (Azul oscuro con borde blanco para satélite)
+            routeLayer = L.polyline(routePoints, {
+                color: '#0000FF', // Azul puro
+                weight: 6,
+                opacity: 0.8,
+                lineJoin: 'round'
+            }).addTo(map);
+
+            // Zoom a la ruta completa (Estado Inicial)
+            map.fitBounds(routeLayer.getBounds(), { padding: [20, 20] });
+            
+            statusPanel.style.display = 'block';
+            startNavigation(); // Iniciar GPS y WakeLock
+        }
+
+        /**
+         * 3. NAVEGACIÓN Y GEOLOCALIZACIÓN
+         */
+        function startNavigation() {
+            requestWakeLock(); // Solicitar pantalla encendida
+
+            if (!navigator.geolocation) {
+                alert("Geolocalización no soportada.");
+                return;
+            }
+
+            if (watchId) navigator.geolocation.clearWatch(watchId);
+
+            watchId = navigator.geolocation.watchPosition(
+                updateUserPosition,
+                (err) => { console.error("Error GPS:", err); gpsText.innerText = "Error GPS"; },
+                { enableHighAccuracy: true, maximumAge: 1000, timeout: 5000 }
+            );
+        }
+
+        function updateUserPosition(position) {
+            const lat = position.coords.latitude;
+            const lon = position.coords.longitude;
+            const accuracy = position.coords.accuracy;
+
+            gpsText.innerText = `Precisión GPS: ±${Math.round(accuracy)}m`;
+
+            // Dibujar/Actualizar marcador de usuario
+            if (!userMarker) {
+                // Círculo rojo grande con borde blanco para visibilidad
+                userMarker = L.circleMarker([lat, lon], {
+                    radius: 10,
+                    fillColor: "#FF0000",
+                    color: "#FFFFFF",
+                    weight: 3,
+                    opacity: 1,
+                    fillOpacity: 1
+                }).addTo(map);
+            } else {
+                userMarker.setLatLng([lat, lon]);
+            }
+
+            // Auto-centrado
+            if (isAutoCentering) {
+                map.panTo([lat, lon], { animate: true });
+                // Forzar zoom de detalle si estamos muy lejos
+                if (map.getZoom() < 16) map.setZoom(17);
+            }
+
+            // Cálculo vectorial de dirección
+            calculateDirectionVector(lat, lon);
+        }
+
+        /**
+         * 4. ALGORITMO VECTORIAL DE SENTIDO
+         */
+        function calculateDirectionVector(currentLat, currentLon) {
+            if (routePoints.length < 2) return;
+
+            // A. Buscar el punto más cercano en la ruta (Índice)
+            // Optimizacion: Distancia Euclidiana cuadrada es suficiente para comparar
+            let minDist = Infinity;
+            let nearestIdx = 0;
+
+            for (let i = 0; i < routePoints.length; i++) {
+                const d = (currentLat - routePoints[i][0])**2 + (currentLon - routePoints[i][1])**2;
+                if (d < minDist) {
+                    minDist = d;
+                    nearestIdx = i;
+                }
+            }
+
+            // B. Calcular Vector Ruta (Tangente en el punto más cercano)
+            // P_next - P_nearest
+            let nextIdx = nearestIdx + 1;
+            if (nextIdx >= routePoints.length) nextIdx = nearestIdx - 1; // Fin de ruta
+
+            const pRouteA = routePoints[nearestIdx];
+            const pRouteB = routePoints[nextIdx];
+            
+            // Vector Ruta (vR)
+            const vR_lat = pRouteB[0] - pRouteA[0];
+            const vR_lon = pRouteB[1] - pRouteA[1];
+
+            // C. Calcular Vector Usuario (Movimiento)
+            if (!lastUserPosition) {
+                lastUserPosition = { lat: currentLat, lon: currentLon, time: Date.now() };
+                return;
+            }
+
+            // Filtrado de ruido: Solo calcular si se ha movido lo suficiente
+            // (aprox > 2 metros para evitar jitter del GPS parado)
+            const distMoved = Math.sqrt((currentLat - lastUserPosition.lat)**2 + (currentLon - lastUserPosition.lon)**2);
+            
+            // Umbral muy básico en grados (aprox 0.00002 ~ 2m)
+            if (distMoved < 0.00002) return; 
+
+            // Vector Usuario (vU)
+            const vU_lat = currentLat - lastUserPosition.lat;
+            const vU_lon = currentLon - lastUserPosition.lon;
+
+            // Actualizar última posición conocida
+            lastUserPosition = { lat: currentLat, lon: currentLon, time: Date.now() };
+
+            // D. Producto Escalar (Dot Product)
+            // dot = (xu * xr) + (yu * yr)
+            const dotProduct = (vU_lat * vR_lat) + (vU_lon * vR_lon);
+
+            // E. Actualizar UI
+            updateDirectionUI(dotProduct);
+        }
+
+        function updateDirectionUI(dotProduct) {
+            // Ajustamos el signo dependiendo de si estamos al final de la ruta (casos borde)
+            // pero el producto escalar general funciona: > 0 mismo sentido, < 0 opuesto.
+            
+            if (dotProduct > 0) {
+                dirIndicator.innerHTML = "ADELANTE &#8593;"; // Flecha Arriba
+                dirIndicator.className = "status-value direction-ok";
+            } else {
+                dirIndicator.innerHTML = "&#8595; SENTIDO CONTRARIO"; // Flecha Abajo
+                dirIndicator.className = "status-value direction-wrong";
+            }
+        }
+
+        /**
+         * 5. GESTIÓN DE ZOOM Y CÁMARA
+         */
+        function disableAutoCenter() {
+            if (isAutoCentering) {
+                isAutoCentering = false;
+                btnRecenter.style.display = 'flex'; // Mostrar botón
+            }
+        }
+
+        btnRecenter.addEventListener('click', () => {
+            isAutoCentering = true;
+            btnRecenter.style.display = 'none';
+            if (userMarker) {
+                const pos = userMarker.getLatLng();
+                map.flyTo(pos, 17); // Zoom de navegación
+            }
+        });
+
+        /**
+         * 6. SCREEN WAKE LOCK (Pantalla Encendida)
+         */
+        async function requestWakeLock() {
+            if ('wakeLock' in navigator) {
+                try {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    wakeStatus.innerText = "Pantalla: ACTIVA (No bloquear)";
+                    wakeStatus.style.color = "#00FF00";
+                    
+                    wakeLock.addEventListener('release', () => {
+                        wakeStatus.innerText = "Pantalla: Normal";
+                        wakeStatus.style.color = "#FFFFFF";
+                    });
+                } catch (err) {
+                    console.error(`${err.name}, ${err.message}`);
+                    wakeStatus.innerText = "Error Pantalla Activa";
+                }
+            }
+        }
+
+        // Re-solicitar bloqueo si la app vuelve a primer plano
+        document.addEventListener('visibilitychange', async () => {
+            if (wakeLock !== null && document.visibilityState === 'visible') {
+                await requestWakeLock();
+            }
+        });
+
+        // Iniciar
+        initMap();
+
+    </script>
+</body>
+</html>
